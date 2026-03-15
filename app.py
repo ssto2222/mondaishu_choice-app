@@ -4,100 +4,154 @@ import glob
 import os
 from supabase import create_client
 
+# ページ設定
 st.set_page_config(page_title="社労士 選択式マスター", layout="wide")
 
 # =========================
-# Supabase接続 (選択式専用テーブル: wrong_questions_selection)
+# 1. Supabase接続
 # =========================
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+except Exception as e:
+    st.error("SupabaseのSecrets設定が不足しています。")
+    st.stop()
 
 # =========================
-# 問題読み込み
+# 2. 問題読み込み
 # =========================
 @st.cache_data
-def load_selection_questions():
+def load_questions():
     all_data = {}
-    # 選択式専用のJSONファイルを読み込む（例: s_01_shaichi.json）
-    json_files = glob.glob("s_*.json") 
+    # ファイル名が "01_労基.json" のような形式を想定
+    json_files = sorted(glob.glob("*.json"))
     for file_path in json_files:
-        subject_name = os.path.splitext(os.path.basename(file_path))[0]
+        name = os.path.splitext(os.path.basename(file_path))[0]
         with open(file_path, "r", encoding="utf-8") as f:
-            all_data[subject_name] = json.load(f)
+            data = json.load(f)
+            # 選択式(selection)のデータのみ抽出
+            all_data[name] = [q for q in data if q.get("type") == "selection"]
     return all_data
 
-questions_dict = load_selection_questions()
+questions_dict = load_questions()
 
 # =========================
-# セッション状態
+# 3. セッション状態の初期化
 # =========================
 if "s_index" not in st.session_state: st.session_state.s_index = 0
 if "s_answered" not in st.session_state: st.session_state.s_answered = False
 if "s_wrong_ids" not in st.session_state: st.session_state.s_wrong_ids = set()
+if "current_cat" not in st.session_state: st.session_state.current_cat = ""
+if "db_synced" not in st.session_state: st.session_state.db_synced = False
 
 # =========================
-# サイドバー
+# 4. DB同期
+# =========================
+def sync_db(user_id):
+    if user_id and not st.session_state.db_synced:
+        try:
+            res = supabase.table("wrong_questions_selection").select("question_id").eq("user_id", user_id).execute()
+            st.session_state.s_wrong_ids = {item["question_id"] for item in res.data}
+            st.session_state.db_synced = True
+        except:
+            st.warning("DB同期に失敗しました。")
+
+# =========================
+# 5. サイドバー
 # =========================
 with st.sidebar:
     st.title("🎯 選択式トレーニング")
-    user_id = st.text_input("ユーザーID", key="s_user")
-    category = st.selectbox("科目", list(questions_dict.keys()))
-    mode = st.radio("モード", ["全問学習", "苦手克服"])
+    u_id = st.text_input("ユーザーID", placeholder="ID入力で保存有効")
+    if u_id: sync_db(u_id)
+    
+    cat_list = list(questions_dict.keys())
+    selected_cat = st.selectbox("科目選択", cat_list)
+    
+    if selected_cat != st.session_state.current_cat:
+        st.session_state.current_cat = selected_cat
+        st.session_state.s_index = 0
+        st.session_state.s_answered = False
+        st.rerun()
+        
+    mode = st.radio("学習モード", ["通常学習", "苦手克服 🔥"])
 
-target = questions_dict.get(category, [])
-if mode == "苦手克服":
+# 問題抽出
+target = questions_dict.get(selected_cat, [])
+if mode == "苦手克服 🔥":
     target = [q for q in target if q["id"] in st.session_state.s_wrong_ids]
 
 if not target:
-    st.info("問題がありません。")
+    st.info("対象の問題がありません。")
     st.stop()
 
-q = target[st.session_state.s_index % len(target)]
+# インデックス調整
+idx = st.session_state.s_index % len(target)
+q = target[idx]
 
 # =========================
-# メイン表示
+# 6. メイン画面
 # =========================
-st.subheader(f"【{category}】 ID: {q['id']}")
-st.markdown("### 問題文")
-st.info(q["q"]) # 問題文（A, B...が含まれる）
+st.title(f"【{selected_cat}】")
+st.progress((idx + 1) / len(target))
 
-st.markdown("---")
-st.markdown("### 解答選択")
+with st.container(border=True):
+    st.markdown(f"#### 問題 ID: {q['id']}")
+    # 穴埋め箇所を強調表示
+    display_q = q["q"].replace("（", " **（ ").replace("）", " ）** ")
+    st.markdown(display_q)
 
-# 空欄ごとにセレクトボックスを生成
+st.divider()
+
+# 回答入力エリア
+st.write("各空欄を選択してください：")
 user_choices = {}
 cols = st.columns(len(q["options"]))
 for i, (label, opts) in enumerate(q["options"].items()):
     with cols[i]:
-        user_choices[label] = st.selectbox(f"空欄 【{label}】", ["-"] + opts)
+        user_choices[label] = st.selectbox(f"空欄 {label}", ["-"] + opts, key=f"q_{q['id']}_{label}")
 
+# 判定ボタン
 if st.button("採点する", use_container_width=True) or st.session_state.s_answered:
     st.session_state.s_answered = True
     
-    # 判定
-    results = {}
-    all_correct = True
-    for label, correct_val in q["a"].items():
-        is_correct = user_choices[label] == correct_val
-        results[label] = is_correct
-        if not is_correct: all_correct = False
-
-    # 結果表示
+    # 全空欄チェック
+    results = {label: (user_choices[label] == q["a"][label]) for label in q["a"]}
+    all_correct = all(results.values())
+    
     if all_correct:
         st.success("🎉 全問正解！")
         if q["id"] in st.session_state.s_wrong_ids:
             st.session_state.s_wrong_ids.remove(q["id"])
+            if u_id:
+                supabase.table("wrong_questions_selection").delete().eq("user_id", u_id).eq("question_id", q["id"]).execute()
     else:
-        st.error("❌ 不正解が含まれます")
+        st.error("❌ 不正解があります")
+        wrong_parts = [k for k, v in results.items() if not v]
         st.session_state.s_wrong_ids.add(q["id"])
-        # 各空欄の正解を表示
-        ans_text = " / ".join([f"{k}: {v}" for k, v in q["a"].items()])
-        st.write(f"**正解一覧:** {ans_text}")
+        
+        # DB保存
+        if u_id:
+            supabase.table("wrong_questions_selection").upsert({
+                "user_id": u_id,
+                "question_id": q["id"],
+                "category_id": selected_cat[:2], # 先頭2文字(01など)を想定
+                "category_name": selected_cat,
+                "wrong_parts": ",".join(wrong_parts)
+            }).execute()
+        
+        # 正解表示
+        cols_ans = st.columns(len(q["a"]))
+        for i, (l, a) in enumerate(q["a"].items()):
+            cols_ans[i].markdown(f"**{l}の正解:**\n{a}")
 
-    st.markdown(f"💡 **解説:** {q['tips']}")
+    st.info(f"💡 **解説**\n\n{q['tips']}")
 
-    if st.button("次の問題へ"):
+    if st.button("次の問題へ ➡️", use_container_width=True):
         st.session_state.s_index += 1
         st.session_state.s_answered = False
         st.rerun()
+
+# ステータス表示
+st.sidebar.divider()
+st.sidebar.write(f"現在の科目の苦手: `{len([i for i in st.session_state.s_wrong_ids if any(x['id']==i for x in target)])}` 問")
