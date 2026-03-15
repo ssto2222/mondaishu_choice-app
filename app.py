@@ -131,14 +131,21 @@ if st.button("採点する", use_container_width=True) or st.session_state.s_ans
         st.session_state.s_wrong_ids.add(q["id"])
         
         # DB保存
+         # app.py の判定ロジック部分を以下のように修正
         if u_id:
-            supabase.table("wrong_questions_selection").upsert({
-                "user_id": u_id,
-                "question_id": q["id"],
-                "category_id": selected_cat[:2], # 先頭2文字(01など)を想定
-                "category_name": selected_cat,
-                "wrong_parts": ",".join(wrong_parts)
-            }).execute()
+            try:
+                # category_id は数値ではなく文字列として送る (例: "01")
+                cat_id_str = str(selected_cat[:2]) 
+                
+                supabase.table("wrong_questions_selection").upsert({
+                    "user_id": str(u_id),
+                    "question_id": int(q["id"]),
+                    "category_id": cat_id_str,
+                    "category_name": str(selected_cat),
+                    "wrong_parts": ",".join(wrong_parts)
+                }).execute()
+            except Exception as db_err:
+                st.error(f"DB保存エラー: {db_err}")
         
         # 正解表示
         cols_ans = st.columns(len(q["a"]))
