@@ -134,16 +134,22 @@ if st.button("採点する", use_container_width=True) or st.session_state.s_ans
          # app.py の判定ロジック部分を以下のように修正
         if u_id:
             try:
-                # category_id は数値ではなく文字列として送る (例: "01")
-                cat_id_str = str(selected_cat[:2]) 
-                
-                supabase.table("wrong_questions_selection").upsert({
-                    "user_id": str(u_id),
+                # 保存するデータ
+                payload = {
+                    "user_id": str(u_id).strip(), # 空白を除去
                     "question_id": int(q["id"]),
-                    "category_id": cat_id_str,
+                    "category_id": str(selected_cat[:2]), 
                     "category_name": str(selected_cat),
-                    "wrong_parts": ",".join(wrong_parts)
-                }).execute()
+                    "wrong_parts": ",".join(wrong_parts),
+                    "updated_at": "now()" # 更新時刻を現在に
+                }
+
+                # upsertを実行（conflictが発生しても上書きする）
+                supabase.table("wrong_questions_selection").upsert(
+                    payload, 
+                    on_conflict="user_id,question_id,category_id" # どの組み合わせで重複判定するか明示
+                ).execute()
+
             except Exception as db_err:
                 st.error(f"DB保存エラー: {db_err}")
         
