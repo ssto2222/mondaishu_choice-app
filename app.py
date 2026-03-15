@@ -42,7 +42,8 @@ if "s_answered" not in st.session_state: st.session_state.s_answered = False
 if "s_wrong_ids" not in st.session_state: st.session_state.s_wrong_ids = set()
 if "db_last_index" not in st.session_state: st.session_state.db_last_index = None
 if "db_synced" not in st.session_state: st.session_state.db_synced = False
-if "app_mode" not in st.session_state: st.session_state.app_mode = "menu" # menu or study
+if "app_mode" not in st.session_state: st.session_state.app_mode = "menu"
+if "study_filter" not in st.session_state: st.session_state.study_filter = "all" # all or wrong_only
 
 # =========================
 # 4. サイドバー
@@ -55,72 +56,82 @@ with st.sidebar:
     cat_list = list(questions_dict.keys())
     selected_cat = st.selectbox("科目選択", cat_list)
 
-    # ユーザーID入力時にDBから前回の進捗を取得
     if u_id and not st.session_state.db_synced:
         try:
-            # 苦手問題の同期
+            # 苦手問題の取得
             res_w = supabase.table("wrong_questions_selection").select("question_id").eq("user_id", u_id).execute()
             st.session_state.s_wrong_ids = {item["question_id"] for item in res_w.data}
             
             # 進行状況の取得
             res_p = supabase.table("user_progress").select("last_index").eq("user_id", u_id).eq("category_name", selected_cat).execute()
-            if res_p.data:
-                st.session_state.db_last_index = res_p.data[0]["last_index"]
-            else:
-                st.session_state.db_last_index = None
+            st.session_state.db_last_index = res_p.data[0]["last_index"] if res_p.data else None
             
             st.session_state.db_synced = True
-        except:
-            pass
+        except: pass
 
-    if st.button("メニューに戻る"):
+    if st.button("メニュー画面へ戻る"):
         st.session_state.app_mode = "menu"
+        st.session_state.db_synced = False # 再同期を促す
         st.rerun()
 
 # =========================
 # 5. メイン画面：メニュー
 # =========================
 if st.session_state.app_mode == "menu":
-    st.title("📚 学習を始める")
+    st.title("📚 学習メニュー")
     st.write(f"現在の科目: **{selected_cat}**")
     
+    # 苦手問題のカウント
+    current_cat_wrong_count = len([q_id for q_id in st.session_state.s_wrong_ids if any(q['id'] == q_id for q in questions_dict.get(selected_cat, []))])
+
     col1, col2 = st.columns(2)
-    
     with col1:
-        if st.button("最初から解く", use_container_width=True):
+        if st.button("最初から解く (全問)", use_container_width=True):
             st.session_state.s_index = 0
+            st.session_state.study_filter = "all"
             st.session_state.app_mode = "study"
             st.session_state.s_answered = False
             st.rerun()
             
-    with col2:
-        # DBに保存されたインデックスがある場合のみ活性化
-        resume_disabled = st.session_state.db_last_index is None
-        if st.button("前回の続きから (中断点より再開)", use_container_width=True, disabled=resume_disabled):
-            st.session_state.s_index = st.session_state.db_last_index
+        # 苦手問題がある場合のみ活性化
+        wrong_disabled = current_cat_wrong_count == 0
+        if st.button(f"苦手問題のみ挑戦 🔥 ({current_cat_wrong_count}問)", use_container_width=True, disabled=wrong_disabled, type="secondary"):
+            st.session_state.s_index = 0
+            st.session_state.study_filter = "wrong_only"
             st.session_state.app_mode = "study"
             st.session_state.s_answered = False
             st.rerun()
-    
-    if resume_disabled:
-        st.caption("※ 前回の保存データがないため、続きからは選択できません。")
-    else:
-        st.success(f"前回の進捗が見つかりました：第 {st.session_state.db_last_index + 1} 問目から再開可能です。")
+
+    with col2:
+        resume_disabled = st.session_state.db_last_index is None
+        if st.button("前回の続きから再開", use_container_width=True, disabled=resume_disabled, type="primary"):
+            st.session_state.s_index = st.session_state.db_last_index
+            st.session_state.study_filter = "all"
+            st.session_state.app_mode = "study"
+            st.session_state.s_answered = False
+            st.rerun()
 
 # =========================
 # 6. メイン画面：学習モード
 # =========================
 else:
-    target = questions_dict.get(selected_cat, [])
+    all_questions = questions_dict.get(selected_cat, [])
+    # フィルタリング
+    if st.session_state.study_filter == "wrong_only":
+        target = [q for q in all_questions if q["id"] in st.session_state.s_wrong_ids]
+    else:
+        target = all_questions
+
     if not target:
-        st.info("対象の問題がありません。")
-        st.stop()
+        st.warning("対象となる問題がありません。メニューに戻ります。")
+        st.session_state.app_mode = "menu"
+        st.rerun()
 
     idx = st.session_state.s_index % len(target)
     q = target[idx]
 
-    st.title(f"📖 {selected_cat}")
-    st.caption(f"問題進捗: {idx + 1} / {len(target)}")
+    st.title(f"📖 {selected_cat} {'(苦手特訓)' if st.session_state.study_filter == 'wrong_only' else ''}")
+    st.caption(f"問題: {idx + 1} / {len(target)}")
     st.progress((idx + 1) / len(target))
 
     with st.container(border=True):
@@ -129,7 +140,6 @@ else:
 
     st.divider()
 
-    st.write("▼ 各空欄の解答を選択してください")
     user_choices = {}
     cols = st.columns(len(q["options"]))
     for i, (label, opts) in enumerate(q["options"].items()):
@@ -180,8 +190,8 @@ else:
                 st.session_state.s_index += 1
                 st.session_state.s_answered = False
                 
-                # --- 進行状況をDBに保存 ---
-                if u_id:
+                # 通常学習モードの時だけ進捗を保存
+                if u_id and st.session_state.study_filter == "all":
                     try:
                         supabase.table("user_progress").upsert({
                             "user_id": u_id,
